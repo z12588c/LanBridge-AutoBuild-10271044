@@ -97,8 +97,9 @@ jobs:
           EOF2
           fi
 
-          # 1. 覆盖 Flutter 主界面与通信源码
+           # 1. 覆盖 Flutter 主界面与通信源码，并自动修复 decodeImageFromList 异步 Future 语法
           cp ../lanbridge_android_main.dart lib/main.dart
+          sed -i 's/decodeImageFromList(frameBytes, (img) {/decodeImageFromList(frameBytes).then((img) {/g' lib/main.dart
 
           # 2. 注入 Kotlin 原生无障碍反控服务与屏幕录制桥接代码
           KOTLIN_DIR="android/app/src/main/kotlin/com/lanbridge/lanbridge_app"
