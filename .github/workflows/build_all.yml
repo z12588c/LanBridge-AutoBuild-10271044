@@ -3,14 +3,11 @@ name: Build LanBridge Windows EXE & Android APK
 push:
 branches: [ "main", "master" ]
 tags: [ "v*" ]
-workflow_dispatch:  # 支持在 GitHub 页面手动点击 "Run workflow" 一键触发
+workflow_dispatch:
 ​permissions:
 contents: write
 ​jobs:
-​=========================================================================
-​任务 1：在云端 Windows 虚拟机自动编译打包 LanBridge_Win.exe
-​=========================================================================
-​build-windows-exe:
+build-windows-exe:
 name: 编译 Windows EXE
 runs-on: windows-latest
 steps:
@@ -20,11 +17,21 @@ uses: actions/checkout@v4
 uses: actions/setup-python@v5
 with:
 python-version: '3.11'
-​- name: 安装依赖与 PyInstaller
+​- name: 自动清理源码并安装 PyInstaller
 run: |
+python - << 'PYCLEAN'
+import pathlib
+p = pathlib.Path("lanbridge_windows.py")
+if p.exists():
+txt = p.read_text(encoding="utf-8", errors="ignore")
+marker = "root.mainloop()"
+if marker in txt:
+txt = txt[:txt.find(marker) + len(marker)] + "\n"
+p.write_text(txt, encoding="utf-8")
+PYCLEAN
 python -m pip install --upgrade pip
 pip install pillow mss pyautogui pyinstaller
-​- name: 使用 PyInstaller 打包独立单文件 EXE
+​- name: 打包独立单文件 EXE
 run: |
 pyinstaller -F -w --name LanBridge_Win lanbridge_windows.py
 ​- name: 上传 LanBridge_Win.exe 构建产物
@@ -32,9 +39,6 @@ uses: actions/upload-artifact@v4
 with:
 name: LanBridge-Windows-EXE
 path: dist/LanBridge_Win.exe
-​=========================================================================
-​任务 2：在云端 Ubuntu 虚拟机自动生成 Flutter 工程并打包 LanBridge_Android.apk
-​=========================================================================
 ​build-android-apk:
 name: 编译 Android APK
 runs-on: ubuntu-latest
@@ -50,15 +54,19 @@ java-version: '17'
 uses: subosito/flutter-action@v2
 with:
 channel: 'stable'
-​- name: 自动初始化 Flutter Android 工程结构并注入源码
+​- name: 初始化 Flutter 工程并自动修复与注入源码
 run: |
 flutter create --org com.lanbridge --project-name lanbridge_app --platforms android build_app
 cd build_app
 flutter pub add file_picker:8.3.7
-​# 0. 强制所有第三方插件使用 compileSdk 36（修复 file_picker 等插件 compileSdk 过低导致的 checkReleaseAarMetadata 报错）
-if [ -f android/build.gradle.kts ]; then
-cat << 'EOF2' >> android/build.gradle.kts
-​subprojects {
+python3 - << 'PYEOF'
+import pathlib, re
+​# 1. 自动配置 subprojects compileSdk 36
+kts = pathlib.Path("android/build.gradle.kts")
+groovy = pathlib.Path("android/build.gradle")
+if kts.exists():
+kts.write_text(kts.read_text(encoding="utf-8") + """
+subprojects {
 if (project.name != "app") {
 afterEvaluate {
 val androidExt = extensions.findByName("android")
@@ -68,10 +76,10 @@ androidExt.compileSdkVersion(36)
 }
 }
 }
-EOF2
-elif [ -f android/build.gradle ]; then
-cat << 'EOF2' >> android/build.gradle
-​subprojects { p ->
+""", encoding="utf-8")
+elif groovy.exists():
+groovy.write_text(groovy.read_text(encoding="utf-8") + """
+subprojects { p ->
 if (p.name != "app") {
 p.afterEvaluate {
 if (p.hasProperty("android")) {
@@ -80,24 +88,37 @@ p.android.compileSdkVersion 36
 }
 }
 }
-EOF2
-fi
-​# 1. 覆盖 Flutter 主界面与通信源码，并自动修复 decodeImageFromList 异步 Future 语法
-cp ../lanbridge_android_main.dart lib/main.dart
-sed -i 's/decodeImageFromList(frameBytes, (img) {/decodeImageFromList(frameBytes).then((img) {/g' lib/main.dart
-​# 2. 注入 Kotlin 原生无障碍反控服务与屏幕录制桥接代码
-KOTLIN_DIR="android/app/src/main/kotlin/com/lanbridge/lanbridge_app"
-mkdir -p "$KOTLIN_DIR"
-sed 's/package com.lanbridge.app/package com.lanbridge.lanbridge_app/g' ../LanBridgeControlService.kt > "$KOTLIN_DIR/LanBridgeControlService.kt"
-sed 's/package com.lanbridge.app/package com.lanbridge.lanbridge_app/g' ../MainActivity.kt > "$KOTLIN_DIR/MainActivity.kt"
-​# 兼容检查：若仓库中的 LanBridgeControlService.kt 为旧版（未包含 performDoubleTap），自动降级为 performTap 防止 Kotlin 编译报错
-if ! grep -q "performDoubleTap" "$KOTLIN_DIR/LanBridgeControlService.kt"; then
-sed -i 's/svc.performDoubleTap(x, y)/svc.performTap(x, y)/g' "$KOTLIN_DIR/MainActivity.kt"
-fi
-​# 3. 生成无障碍服务配置文件 res/xml/accessibility_service_config.xml
-mkdir -p android/app/src/main/res/xml
-cat << 'EOF' > android/app/src/main/res/xml/accessibility_service_config.xml
-<?xml version="1.0" encoding="utf-8"?>
+""", encoding="utf-8")
+​# 2. 清理并修复 Dart 源码（去除可能误粘贴的尾部脚本，修复 decodeImageFromList 语法）
+dart_src = pathlib.Path("../lanbridge_android_main.dart").read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n")
+if "#!/" in dart_src:
+dart_src = dart_src[:dart_src.find("#!/")]
+dart_src = dart_src.replace(
+"decodeImageFromList(frameBytes, (img) {",
+"decodeImageFromList(frameBytes).then((img) {"
+)
+pathlib.Path("lib/main.dart").write_text(dart_src, encoding="utf-8")
+​# 3. 清理并注入 Kotlin 原生代码（移除可能导致未解析引用的 androidx.annotation）
+kotlin_dir = pathlib.Path("android/app/src/main/kotlin/com/lanbridge/lanbridge_app")
+kotlin_dir.mkdir(parents=True, exist_ok=True)
+​svc_code = pathlib.Path("../LanBridgeControlService.kt").read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n")
+if "#!/" in svc_code:
+svc_code = svc_code[:svc_code.find("#!/")]
+svc_code = svc_code.replace("package com.lanbridge.app", "package com.lanbridge.lanbridge_app")
+svc_code = svc_code.replace("import androidx.annotation.RequiresApi", "")
+svc_code = svc_code.replace("@RequiresApi(Build.VERSION_CODES.N)", "")
+​main_code = pathlib.Path("../MainActivity.kt").read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n")
+if "#!/" in main_code:
+main_code = main_code[:main_code.find("#!/")]
+main_code = main_code.replace("package com.lanbridge.app", "package com.lanbridge.lanbridge_app")
+if "performDoubleTap" not in svc_code:
+main_code = main_code.replace("svc.performDoubleTap(x, y)", "svc.performTap(x, y)")
+​(kotlin_dir / "LanBridgeControlService.kt").write_text(svc_code, encoding="utf-8")
+(kotlin_dir / "MainActivity.kt").write_text(main_code, encoding="utf-8")
+​# 4. 写入无障碍服务 XML 配置
+xml_dir = pathlib.Path("android/app/src/main/res/xml")
+xml_dir.mkdir(parents=True, exist_ok=True)
+(xml_dir / "accessibility_service_config.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
 android:accessibilityEventTypes="typeAllMask"
 android:accessibilityFeedbackType="feedbackGeneric"
@@ -105,10 +126,10 @@ android:accessibilityFlags="flagDefault"
 android:canPerformGestures="true"
 android:canRetrieveWindowContent="true"
 android:notificationTimeout="50" />
-EOF
-​# 4. 写入包含局域网、文件读写与无障碍手势权限的 AndroidManifest.xml
-cat << 'EOF' > android/app/src/main/AndroidManifest.xml
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+""".strip(), encoding="utf-8")
+​# 5. 写入 AndroidManifest.xml
+manifest = pathlib.Path("android/app/src/main/AndroidManifest.xml")
+manifest.write_text("""<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 <uses-permission android:name="android.permission.INTERNET"/>
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
@@ -155,7 +176,9 @@ android:name="flutterEmbedding"
 android:value="2" />
 </application>
 </manifest>
-EOF
+""".strip(), encoding="utf-8")
+print("All Android project files cleaned and injected successfully.")
+PYEOF
 ​- name: 编译 Release 版 APK
 working-directory: build_app
 run: |
